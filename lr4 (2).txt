@@ -1,0 +1,218 @@
+;Бригада №5
+;Ефимова, Шеянова, А-17-22
+;ЛР4 - СД, часы
+
+TStart equ 500     ; Интервал для Timer0 - время между переключениями разрядов
+NCount equ 6       ; количество выводимых позиций
+RG2 equ 0A000h
+RG3 equ 0B000h     
+
+; Для периода 50 мс требуется 50000 тактов → 25000 циклов таймера
+TICKS_50MS equ 25000
+T1_RELOAD equ 65536 - TICKS_50MS
+
+dseg at 30h
+DigitDivision: ds NCount ; Массив цифр для вывода на индикатор
+Position: ds 1           ; Маска текущего активного разряда
+Seconds: ds 1            ; Текущие секунды (0–59)
+Minutes: ds 1            ; Текущие минуты (0–59)
+TickCounter: ds 1        ; Счётчик для формирования 1 секунды
+
+cseg
+jmp START
+
+; Прерывание Timer0 — мультиплексирование индикатора
+org 0Bh
+call TIMER_DISPLAY
+reti
+
+; Прерывание Timer1 — подсчёт времени (50 мс)
+org 1Bh
+call TIMER_CLOCK
+reti
+
+org 30h
+START:
+mov Minutes, #0          
+mov Seconds, #0        
+mov TickCounter, #0
+
+; Создаём начальный массив отображения (00:00)
+call UPDATE_DISPLAY_ARRAY
+
+mov r0, #0                    ; Индекс текущего разряда
+mov Position, #10111111b      ; Начальная маска разряда
+
+; Настройка Timer0 и Timer1 (режим 1 — 16 бит)
+mov TMOD, #00010001b 
+
+; Загрузка Timer0
+mov TH0, #high(65535-TStart)
+mov TL0, #low(65535-TStart)
+
+; Загрузка Timer1 (50 мс)
+mov TH1, #high(T1_RELOAD)
+mov TL1, #low(T1_RELOAD)
+
+; Разрешаем прерывания (EA=1, ET1=1, ET0=1)
+mov IE, #10001010b ; EA=1, ET1=1, ET0=1
+
+; Запуск таймеров
+setb TR0  ; 
+setb TR1  ; 
+
+MAIN_LOOP:
+jmp MAIN_LOOP
+
+; TIMER0
+; Мультиплексирование индикатора (переключение разрядов)
+TIMER_DISPLAY:
+push acc
+push dpl
+push dph
+
+; Снова загружаем Timer0
+mov TH0, #high(65535-TStart)
+mov TL0, #low(65535-TStart)
+
+; Гасим индикатор перед переключением
+mov dptr, #RG3
+mov a, #0
+movx @dptr, a
+
+; Вывод маски разряда
+mov dptr, #RG2
+mov a, Position
+movx @dptr, a
+
+; Получаем значение цифры из массива
+mov a, #DigitDivision
+add a, r0
+mov r1, a
+mov a, @r1
+
+; Разряд 2 — выводим точки (":")
+cjne r0, #2, DISPLAY_DIGIT
+mov a, #01000000b 
+sjmp OUTPUT_TO_DISPLAY
+
+DISPLAY_DIGIT:
+; Если цифра равна 10 — значит пусто
+cjne a, #10, CONVERT_DIGIT
+mov a, #0 
+sjmp OUTPUT_TO_DISPLAY
+
+CONVERT_DIGIT:
+; Таблица сегментов для цифр 0–9
+mov dptr, #DigitTable
+movc a, @a+dptr
+
+OUTPUT_TO_DISPLAY:
+; Вывод сегментов
+mov dptr, #RG3
+movx @dptr, a  
+
+; Сдвигаем маску разряда
+mov a, Position
+rr a
+mov Position, a
+inc r0
+cjne r0, #NCount, END_TIMER_DISPLAY
+
+; Если прошли все 6 разрядов — сбрасываем
+mov r0, #0
+mov Position, #10111111b
+
+END_TIMER_DISPLAY:
+pop dph
+pop dpl
+pop acc
+ret
+
+; TIMER1
+; Обработка 50 мс тактов — формирование секунд
+
+TIMER_CLOCK:
+push acc
+push psw
+
+; Обновляем Timer1
+mov TH1, #high(T1_RELOAD)
+mov TL1, #low(T1_RELOAD)
+
+; Считаем 20 тиков → 1000 мс → 1 секунда
+inc TickCounter
+mov a, TickCounter
+cjne a, #20, END_TIMER_CLOCK
+mov TickCounter, #0
+
+; Увеличиваем секунды
+inc Seconds
+mov a, Seconds
+cjne a, #60, UPDATE_TIME 
+
+; Переполнение секунд → увеличиваем минуты
+mov Seconds, #0
+inc Minutes
+mov a, Minutes
+cjne a, #60, UPDATE_TIME 
+
+; Переполнение 60 минут → сброс часов
+mov Minutes, #0
+
+UPDATE_TIME:
+ ; Обновляем массив отображения
+call UPDATE_DISPLAY_ARRAY
+
+END_TIMER_CLOCK:
+pop psw
+pop acc
+ret
+
+; заполнение массива вывода
+; формируем массив шести позиций: MM : SS
+
+UPDATE_DISPLAY_ARRAY:
+push acc
+push b
+push psw
+
+; минуты
+mov a, Minutes
+mov b, #10
+div ab          ; A = десятки минут, B = единицы минут
+mov DigitDivision+0, a 
+mov DigitDivision+1, b 
+
+mov DigitDivision+2, #10 ; Разделитель ":" — отдельный обработчик
+
+; секунды
+mov a, Seconds
+mov b, #10
+div ab          
+mov DigitDivision+3, a 
+mov DigitDivision+4, b  
+
+; Последний разряд — пустой
+mov DigitDivision+5, #10
+
+pop psw
+pop b
+pop acc
+ret
+
+; таблица сегментов
+DigitTable: 
+db 00111111b  ; 0
+db 00000110b  ; 1
+db 01011011b  ; 2
+db 01001111b  ; 3
+db 01100110b  ; 4
+db 01101101b  ; 5
+db 01111101b  ; 6
+db 00000111b  ; 7
+db 01111111b  ; 8
+db 01101111b  ; 9
+db 00000000b  ; 10 - пусто
+
+end
